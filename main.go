@@ -21,6 +21,15 @@ var AppConfig = struct {
 	RenotifySeconds  int    `json:"renotify_seconds"`
 }{}
 
+type Updates struct {
+	Id                   string `json:"_id"`
+	Name                 string `json:"fname"`
+	UpdatedAt            string `json:"_updatedAt"`
+	Alert                bool   `json:"alert"`
+	DisableNotifications bool   `json:"disableNotifications"`
+	Unread               int32  `json:"unread"`
+}
+
 func loadConfig() {
 	raw, err := os.ReadFile("config.json")
 	if err != nil {
@@ -30,41 +39,24 @@ func loadConfig() {
 	json.Unmarshal(raw, &AppConfig)
 }
 
-func getRocketData() (string, error) {
+func getRocketData() ([]Updates, error) {
 	req, err := http.NewRequest("GET", AppConfig.RocketApiUrl+"/api/v1/subscriptions.get", nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-User-Id", AppConfig.RocketApiUser)
 	req.Header.Set("X-Auth-Token", AppConfig.RocketApiToken)
 	res, err := apiClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer res.Body.Close()
 	target := struct {
-		Update []struct {
-			Id                   string `json:"_id"`
-			Name                 string `json:"fname"`
-			UpdatedAt            string `json:"_updatedAt"`
-			Alert                bool   `json:"alert"`
-			DisableNotifications bool   `json:"disableNotifications"`
-			Unread               int32  `json:"unread"`
-		} `json:"update"`
+		Update []Updates `json:"update"`
 	}{}
 	json.NewDecoder(res.Body).Decode(&target)
-	msg := ""
-	for _, item := range target.Update {
-		if item.Alert == false || item.DisableNotifications == true {
-			continue
-		}
-		msg += "- " + item.Name + "\n"
-	}
-	if msg != "" {
-		msg = AppConfig.RocketApiUrl + "\nNew messages in chats:\n" + msg
-	}
-	return msg, nil
+	return target.Update, nil
 }
 
 func sendTgMessage(msg string, chatID string) error {
@@ -93,16 +85,36 @@ func sendTgMessage(msg string, chatID string) error {
 
 func main() {
 	loadConfig()
+	updatesInfo := make(map[string]string)
 	var lastAlertTime int64 = 0
 	if AppConfig.RenotifySeconds == 0 {
 		AppConfig.RenotifySeconds = 3600
 	}
+	err := sendTgMessage("Notifier started", AppConfig.TelegramChatID)
+	if err != nil {
+		panic(err)
+	}
 	for {
-		msg, err := getRocketData()
+		updates, err := getRocketData()
 		if err != nil {
 			fmt.Println(err)
 		}
-		if msg != "" && (lastAlertTime == 0 || time.Now().Unix()-lastAlertTime > int64(AppConfig.RenotifySeconds)) {
+		msg := ""
+		for _, item := range updates {
+			if !item.Alert || item.DisableNotifications {
+				continue
+			}
+			_, ok := updatesInfo[item.Name]
+			if !ok || (ok && updatesInfo[item.Name] != item.UpdatedAt) {
+				updatesInfo[item.Name] = item.UpdatedAt
+				msg += "- " + item.Name + "\n" + "   " + item.UpdatedAt + "\n"
+			}
+		}
+		if msg != "" {
+			msg = AppConfig.RocketApiUrl + "\nNew messages in chats:\n" + msg
+			if lastAlertTime != 0 && time.Now().Unix()-lastAlertTime > int64(AppConfig.RenotifySeconds) {
+				continue
+			}
 			err := sendTgMessage(msg, AppConfig.TelegramChatID)
 			if err != nil {
 				fmt.Println(err)
